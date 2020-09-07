@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -28,6 +28,8 @@ from seqeval.metrics import (
 )
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+from utils import split_str_into_words, get_sentences
 
 model_types = {
     "bert": {
@@ -58,32 +60,6 @@ models_map = {
 }
 
 
-def get_sentences(data: pd.DataFrame):
-    """[summary]
-
-    :Parameters:
-        - df (pd.DataFrame): expected to have three columns (sentence_id, word, label)
-    """
-    labeled_sentences = (
-        data.groupby("sentence_id")
-        .apply(
-            lambda s: [
-                (w, t)
-                for w, t in zip(
-                    s["word"].values.tolist(),
-                    s["label"].values.tolist(),
-                )
-            ]
-        )
-        .values.tolist()
-    )
-
-    sentences = [[elt[0] for elt in sentence] for sentence in labeled_sentences]
-    labels = [[elt[1] for elt in sentence] for sentence in labeled_sentences]
-
-    return sentences, labels
-
-
 @dataclass
 class NERArgs:
     do_lower_case: bool = False
@@ -99,7 +75,9 @@ class NERArgs:
 
 
 class NERModel:
-    def __init__(self, model_name: str, labels: List[str], ner_args: NERArgs = None):
+    def __init__(
+        self, model_name: str, labels: List[str], ner_args: Optional[NERArgs] = None
+    ):
         self.model_name = model_name
         self.model_type = models_map[self.model_name]
 
@@ -116,6 +94,7 @@ class NERModel:
         )
 
         self.model_class = model_tools["model"]
+
         self.model = self.model_class.from_pretrained(
             self.model_name,
             num_labels=len(self.labels),
@@ -143,6 +122,40 @@ class NERModel:
 
         return tokenized_sentence, labels
 
+    def pad_tokens(
+        self, tokens: List[str], tokens_labels: Optional[List[str]] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        input_ids = torch.tensor(
+            pad_sequences(
+                [self.tokenizer.convert_tokens_to_ids(txt) for txt in tokens],
+                maxlen=self.ner_args.max_sequence_len,
+                dtype="long",
+                value=0.0,
+                truncating="post",
+                padding="post",
+            )
+        )
+
+        attention_masks = torch.tensor(
+            [[float(i != 0.0) for i in ii] for ii in input_ids]
+        )
+
+        if tokens_labels:
+            padded_labels = torch.tensor(
+                pad_sequences(
+                    [[self.labels.get(ll) for ll in lab] for lab in tokens_labels],
+                    maxlen=self.ner_args.max_sequence_len,
+                    value=self.labels["PAD"],
+                    padding="post",
+                    dtype="long",
+                    truncating="post",
+                )
+            )
+
+            return input_ids, attention_masks, padded_labels
+
+        return input_ids, attention_masks, None
+
     def prepare_dataloader(self, text_data: pd.DataFrame):
         sentences, labels = get_sentences(text_data)
         tokenized_texts_and_labels = [
@@ -157,28 +170,9 @@ class NERModel:
             token_label_pair[1] for token_label_pair in tokenized_texts_and_labels
         ]
 
-        input_ids = pad_sequences(
-            [self.tokenizer.convert_tokens_to_ids(txt) for txt in tokenized_texts],
-            maxlen=self.ner_args.max_sequence_len,
-            dtype="long",
-            value=0.0,
-            truncating="post",
-            padding="post",
+        input_ids, attention_masks, padded_labels = self.pad_tokens(
+            tokenized_texts, tokenized_labels
         )
-        padded_labels = pad_sequences(
-            [[self.labels.get(ll) for ll in lab] for lab in tokenized_labels],
-            maxlen=self.ner_args.max_sequence_len,
-            value=self.labels["PAD"],
-            padding="post",
-            dtype="long",
-            truncating="post",
-        )
-        attention_masks = torch.tensor(
-            [[float(i != 0.0) for i in ii] for ii in input_ids]
-        )
-
-        input_ids = torch.tensor(input_ids)
-        padded_labels = torch.tensor(padded_labels)
 
         tensor = TensorDataset(input_ids, attention_masks, padded_labels)
         sampler = RandomSampler(tensor)
@@ -249,7 +243,7 @@ class NERModel:
             total_loss = 0
 
             # Training loop
-            for step, batch in enumerate(tr_dataloader):
+            for batch in tr_dataloader:
                 # add batch to gpu
                 batch = tuple(t.to(self.device) for t in batch)
                 b_input_ids, b_input_mask, b_labels = batch
@@ -346,6 +340,22 @@ class NERModel:
             print(classification_report(valid_tags, pred_tags))
             print()
         ############ TODO: dirty
+
+    def predict(self, text: str):
+        self.model.eval()
+
+        tokens = self.tokenizer.tokenize(text)
+        tokens_ids, attention_mask, _ = self.pad_tokens([tokens])
+
+        tokens_ids = tokens_ids.to(self.device)
+        attention_mask = attention_mask.to(self.device)
+
+        with torch.no_grad():
+            prediction_outputs = self.model(
+                tokens_ids, token_type_ids=None, attention_mask=attention_mask
+            )
+
+        return prediction_outputs
 
     def plot_learning_curve(self):
         # Use plot styling from seaborn.
