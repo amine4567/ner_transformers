@@ -1,18 +1,4 @@
-from itertools import groupby
-
 import pandas as pd
-
-
-def split_str_into_words(sentence: str):
-    for k, g in groupby(enumerate(sentence), lambda x: x[1].isalnum()):
-        word_split = list(g)
-        if k:
-            word_str = "".join([elt[1] for elt in word_split])
-            yield word_str
-        else:
-            for char in word_split:
-                if not char[1].isspace():
-                    yield char[1]
 
 
 def get_sentences(data: pd.DataFrame):
@@ -21,10 +7,7 @@ def get_sentences(data: pd.DataFrame):
         .apply(
             lambda s: [
                 (w, t)
-                for w, t in zip(
-                    s["word"].values.tolist(),
-                    s["label"].values.tolist(),
-                )
+                for w, t in zip(s["word"].values.tolist(), s["label"].values.tolist())
             ]
         )
         .values.tolist()
@@ -34,3 +17,9 @@ def get_sentences(data: pd.DataFrame):
     labels = [[elt[1] for elt in sentence] for sentence in labeled_sentences]
 
     return sentences, labels
+
+
+def remove_bio(label: str):
+    if label.startswith("B-") or label.startswith("I-"):
+        return label[2:]
+    return label

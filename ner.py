@@ -21,6 +21,7 @@ import torch
 from tqdm import trange
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler
 from keras.preprocessing.sequence import pad_sequences
+from sklearn.metrics import classification_report as skl_classification_report
 from seqeval.metrics import (
     f1_score,
     accuracy_score,
@@ -28,14 +29,12 @@ from seqeval.metrics import (
 )
 import matplotlib.pyplot as plt
 import seaborn as sns
+from nervaluate import Evaluator
 
-from utils import split_str_into_words, get_sentences
+from utils import get_sentences, remove_bio
 
 model_types = {
-    "bert": {
-        "tokenizer": BertTokenizer,
-        "model": BertForTokenClassification,
-    },
+    "bert": {"tokenizer": BertTokenizer, "model": BertForTokenClassification,},
     "roberta": {"tokenizer": RobertaTokenizer, "model": RobertaForTokenClassification},
     "camembert": {
         "tokenizer": CamembertTokenizer,
@@ -65,7 +64,7 @@ class NERArgs:
     do_lower_case: bool = False
     max_sequence_len = None
     batch_size: int = 32
-    pad_token: str = "PAD"
+    pad_token_value: str = "PAD"
     epochs: int = 5
     max_grad_norm: float = 1.0
     no_decay_params: Tuple = ("bias", "gamma", "beta")
@@ -83,7 +82,16 @@ class NERModel:
 
         self.ner_args = ner_args if ner_args is not None else NERArgs()
 
-        self.label_values = labels + [self.ner_args.pad_token]
+        self.label_values = labels + [self.ner_args.pad_token_value]
+        self.raw_labels_values = list(
+            set(
+                [
+                    elt.replace("B-", "").replace("I-", "")
+                    for elt in self.label_values
+                    if elt != self.ner_args.pad_token_value and elt != "O"
+                ]
+            )
+        )
         self.labels = {t: i for i, t in enumerate(self.label_values)}
 
         model_tools = model_types[self.model_type]
@@ -145,7 +153,7 @@ class NERModel:
                 pad_sequences(
                     [[self.labels.get(ll) for ll in lab] for lab in tokens_labels],
                     maxlen=self.ner_args.max_sequence_len,
-                    value=self.labels["PAD"],
+                    value=self.labels[self.ner_args.pad_token_value],
                     padding="post",
                     dtype="long",
                     truncating="post",
@@ -324,13 +332,13 @@ class NERModel:
                 self.label_values[p_i]
                 for p, l in zip(predictions, true_labels)
                 for p_i, l_i in zip(p, l)
-                if self.label_values[l_i] != "PAD"
+                if self.label_values[l_i] != self.ner_args.pad_token_value
             ]
             valid_tags = [
                 self.label_values[l_i]
                 for ll in true_labels
                 for l_i in ll
-                if self.label_values[l_i] != "PAD"
+                if self.label_values[l_i] != self.ner_args.pad_token_value
             ]
             print(
                 "Validation Accuracy: {}".format(accuracy_score(valid_tags, pred_tags))
@@ -338,6 +346,58 @@ class NERModel:
             print("Validation F1-Score: {}".format(f1_score(valid_tags, pred_tags)))
             print("Validation classification report:")
             print(classification_report(valid_tags, pred_tags))
+
+            print("=== elementwise scores ===")
+
+            raw_valid_tags = list(map(remove_bio, valid_tags))
+            raw_pred_tags = list(map(remove_bio, pred_tags))
+
+            elementwise_report = skl_classification_report(
+                raw_valid_tags, raw_pred_tags
+            )
+            print(elementwise_report)
+
+            print("=== SemEval metrics ===")
+            pred_tags_by_sentence = [
+                [
+                    self.label_values[p_i]
+                    for p_i, l_i in zip(p, l)
+                    if self.label_values[l_i] != self.ner_args.pad_token_value
+                ]
+                for p, l in zip(predictions, true_labels)
+            ]
+            valid_tags_by_sentence = [
+                [
+                    self.label_values[l_i]
+                    for l_i in ll
+                    if self.label_values[l_i] != self.ner_args.pad_token_value
+                ]
+                for ll in true_labels
+            ]
+
+            evaluator = Evaluator(
+                valid_tags_by_sentence,
+                pred_tags_by_sentence,
+                tags=self.raw_labels_values,
+                loader="list",
+            )
+            _, results_by_tag = evaluator.evaluate()
+            score_types = ["ent_type", "partial", "strict", "exact"]
+            for score_type in score_types:
+                print()
+                print(f"---{score_type}---")
+                df = pd.DataFrame(
+                    {
+                        label: {
+                            key: val
+                            for key, val in scores[score_type].items()
+                            if key in ["precision", "recall"]
+                        }
+                        for label, scores in results_by_tag.items()
+                    }
+                ).transpose()
+                print(df)
+
             print()
         ############ TODO: dirty
 
@@ -351,11 +411,15 @@ class NERModel:
         attention_mask = attention_mask.to(self.device)
 
         with torch.no_grad():
-            prediction_outputs = self.model(
+            tokens_logits = self.model(
                 tokens_ids, token_type_ids=None, attention_mask=attention_mask
-            )
+            )[0]
 
-        return prediction_outputs
+        tokens_with_logits = dict(
+            {tokens[i]: tokens_logits[0, i] for i in range(len(tokens))}
+        )
+
+        return tokens_with_logits
 
     def plot_learning_curve(self):
         # Use plot styling from seaborn.
