@@ -7,7 +7,10 @@ def get_sentences(data: pd.DataFrame):
         .apply(
             lambda s: [
                 (w, t)
-                for w, t in zip(s["word"].values.tolist(), s["label"].values.tolist())
+                for w, t in zip(
+                    s["word"].values.tolist(),
+                    s["label"].values.tolist(),
+                )
             ]
         )
         .values.tolist()

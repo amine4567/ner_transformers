@@ -32,9 +32,13 @@ import seaborn as sns
 from nervaluate import Evaluator
 
 from utils import get_sentences, remove_bio
+from scoring import make_partial_match_report
 
 model_types = {
-    "bert": {"tokenizer": BertTokenizer, "model": BertForTokenClassification,},
+    "bert": {
+        "tokenizer": BertTokenizer,
+        "model": BertForTokenClassification,
+    },
     "roberta": {"tokenizer": RobertaTokenizer, "model": RobertaForTokenClassification},
     "camembert": {
         "tokenizer": CamembertTokenizer,
@@ -344,11 +348,13 @@ class NERModel:
                 "Validation Accuracy: {}".format(accuracy_score(valid_tags, pred_tags))
             )
             print("Validation F1-Score: {}".format(f1_score(valid_tags, pred_tags)))
-            print("Validation classification report:")
+            print()
+
+            print("=== Exact match scores ===")
             print(classification_report(valid_tags, pred_tags))
+            print()
 
             print("=== elementwise scores ===")
-
             raw_valid_tags = list(map(remove_bio, valid_tags))
             raw_pred_tags = list(map(remove_bio, pred_tags))
 
@@ -356,8 +362,9 @@ class NERModel:
                 raw_valid_tags, raw_pred_tags
             )
             print(elementwise_report)
+            print()
 
-            print("=== SemEval metrics ===")
+            print("=== Partial match socres ===")
             pred_tags_by_sentence = [
                 [
                     self.label_values[p_i]
@@ -375,28 +382,35 @@ class NERModel:
                 for ll in true_labels
             ]
 
-            evaluator = Evaluator(
-                valid_tags_by_sentence,
-                pred_tags_by_sentence,
-                tags=self.raw_labels_values,
-                loader="list",
+            partial_match_report = make_partial_match_report(
+                valid_tags_by_sentence, pred_tags_by_sentence
             )
-            _, results_by_tag = evaluator.evaluate()
-            score_types = ["ent_type", "partial", "strict", "exact"]
-            for score_type in score_types:
-                print()
-                print(f"---{score_type}---")
-                df = pd.DataFrame(
-                    {
-                        label: {
-                            key: val
-                            for key, val in scores[score_type].items()
-                            if key in ["precision", "recall"]
-                        }
-                        for label, scores in results_by_tag.items()
-                    }
-                ).transpose()
-                print(df)
+            print(partial_match_report)
+            print()
+
+            # print("=== SemEval metrics ===")
+            # evaluator = Evaluator(
+            #     valid_tags_by_sentence,
+            #     pred_tags_by_sentence,
+            #     tags=self.raw_labels_values,
+            #     loader="list",
+            # )
+            # _, results_by_tag = evaluator.evaluate()
+            # score_types = ["ent_type", "partial", "strict", "exact"]
+            # for score_type in score_types:
+            #     print()
+            #     print(f"---{score_type}---")
+            #     df = pd.DataFrame(
+            #         {
+            #             label: {
+            #                 key: val
+            #                 for key, val in scores[score_type].items()
+            #                 if key in ["precision", "recall"]
+            #             }
+            #             for label, scores in results_by_tag.items()
+            #         }
+            #     ).transpose()
+            #     print(df)
 
             print()
         ############ TODO: dirty
