@@ -3,8 +3,10 @@ from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import classification_report as skl_classification_report
 from seqeval.metrics.sequence_labeling import get_entities
 import portion
+from nervaluate import Evaluator
 
 from utils import remove_bio
 
@@ -149,3 +151,47 @@ def make_partial_match_report(
     report.loc["macro_avg"] = report.mean()
 
     return report
+
+
+def make_tokenwise_scores_report(
+    real_tags_by_sentence: List[List[str]],
+    pred_tags_by_sentence: List[List[str]],
+):
+    real_tags_flat = [elt for ll in real_tags_by_sentence for elt in ll]
+    pred_tags_flat = [elt for ll in pred_tags_by_sentence for elt in ll]
+
+    raw_real_tags = list(map(remove_bio, real_tags_flat))
+    raw_pred_tags = list(map(remove_bio, pred_tags_flat))
+
+    tokenwise_report = skl_classification_report(raw_real_tags, raw_pred_tags)
+
+    return tokenwise_report
+
+
+def compute_semeval_scores(
+    real_tags_by_sentence: List[List[str]],
+    pred_tags_by_sentence: List[List[str]],
+    raw_labels_values: List[str],
+):
+    evaluator = Evaluator(
+        real_tags_by_sentence,
+        pred_tags_by_sentence,
+        tags=[label for label in raw_labels_values if label != "O"],
+        loader="list",
+    )
+    _, results_by_tag = evaluator.evaluate()
+    semeval_scores = {
+        score_type: pd.DataFrame(
+            {
+                label: {
+                    key: val
+                    for key, val in scores[score_type].items()
+                    if key in ["precision", "recall"]
+                }
+                for label, scores in results_by_tag.items()
+            }
+        ).transpose()
+        for score_type in ["ent_type", "partial", "strict", "exact"]
+    }
+
+    return semeval_scores

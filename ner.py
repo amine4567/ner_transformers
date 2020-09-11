@@ -21,7 +21,6 @@ import torch
 from tqdm import trange
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler
 from keras.preprocessing.sequence import pad_sequences
-from sklearn.metrics import classification_report as skl_classification_report
 from seqeval.metrics import (
     f1_score,
     accuracy_score,
@@ -29,10 +28,14 @@ from seqeval.metrics import (
 )
 import matplotlib.pyplot as plt
 import seaborn as sns
-from nervaluate import Evaluator
+from scipy.special import softmax
 
-from utils import get_sentences, remove_bio
-from scoring import make_partial_match_report
+from utils import get_sentences
+from scoring import (
+    make_partial_match_report,
+    make_tokenwise_scores_report,
+    compute_semeval_scores,
+)
 
 model_types = {
     "bert": {
@@ -87,16 +90,9 @@ class NERModel:
         self.ner_args = ner_args if ner_args is not None else NERArgs()
 
         self.label_values = labels + [self.ner_args.pad_token_value]
-        self.raw_labels_values = list(
-            set(
-                [
-                    elt.replace("B-", "").replace("I-", "")
-                    for elt in self.label_values
-                    if elt != self.ner_args.pad_token_value and elt != "O"
-                ]
-            )
-        )
         self.labels = {t: i for i, t in enumerate(self.label_values)}
+
+        self.set_raw_labels_data()
 
         model_tools = model_types[self.model_type]
 
@@ -116,6 +112,29 @@ class NERModel:
         self.model.cuda()
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def set_raw_labels_data(self):
+        labels_ids_df = (
+            pd.DataFrame(
+                index=self.labels.keys(),
+                columns=["id"],
+                data=self.labels.values(),
+            )
+            .reset_index()
+            .rename(columns={"index": "bio_tag"})
+        )
+        labels_ids_df["tag_raw"] = (
+            labels_ids_df.bio_tag.str.split("-")
+            .str.get(1)
+            .fillna(labels_ids_df.bio_tag)
+        )
+
+        self.raw_labels_ids = {
+            raw_tag: tmp_df.id.values
+            for raw_tag, tmp_df in labels_ids_df.groupby("tag_raw")
+            if raw_tag != self.ner_args.pad_token_value
+        }
+        self.raw_labels_values = list(self.raw_labels_ids.keys())
 
     def tokenize_and_preserve_labels(self, sentence, text_labels):
         tokenized_sentence = []
@@ -202,9 +221,7 @@ class NERModel:
             - eval_data (pd.DataFrame, optional): same as train_data. Defaults to None.
         """
         tr_dataloader = self.prepare_dataloader(train_data)
-        eval_dataloader = self.prepare_dataloader(eval_data)
 
-        ############## TODO: dirty
         param_optimizer = list(self.model.named_parameters())
         optimizer_grouped_parameters = [
             {
@@ -240,7 +257,7 @@ class NERModel:
         )
 
         ## Store the average loss after each epoch so we can plot them.
-        self.loss_values: List = []
+        self.train_loss_values: List = []
         self.validation_loss_values: List = []
 
         for _ in trange(self.ner_args.epochs, desc="Epoch"):
@@ -292,95 +309,90 @@ class NERModel:
             print("Average train loss: {}".format(avg_train_loss))
 
             # Store the loss value for plotting the learning curve.
-            self.loss_values.append(avg_train_loss)
+            self.train_loss_values.append(avg_train_loss)
 
-            # ========================================
-            #               Validation
-            # ========================================
-            # After the completion of each training epoch, measure our performance on
-            # our validation set.
+            if eval_data is not None:
+                eval_loss = self.evaluate(eval_data)
+                self.validation_loss_values.append(eval_loss)
 
-            # Put the model into evaluation mode
-            self.model.eval()
-            # Reset the validation loss for this epoch.
-            eval_loss = 0.0
-            predictions, true_labels = [], []
-            for batch in eval_dataloader:
-                batch = tuple(t.to(self.device) for t in batch)
-                b_input_ids, b_input_mask, b_labels = batch
+    def evaluate(
+        self,
+        eval_data: pd.DataFrame,
+        exact_match: bool = True,
+        partial_match: bool = False,
+        tokenwise_scores: bool = False,
+        semeval_scores: bool = False,
+    ):
+        eval_dataloader = self.prepare_dataloader(eval_data)
 
-                # Telling the model not to compute or store gradients,
-                # saving memory and speeding up validation
-                with torch.no_grad():
-                    # Forward pass, calculate logit predictions.
-                    # This will return the logits rather than the loss because we have not provided labels.
-                    outputs = self.model(
-                        b_input_ids,
-                        token_type_ids=None,
-                        attention_mask=b_input_mask,
-                        labels=b_labels,
-                    )
-                # Move logits and labels to CPU
-                logits = outputs[1].detach().cpu().numpy()
-                label_ids = b_labels.to("cpu").numpy()
+        # Put the model into evaluation mode
+        self.model.eval()
+        # Reset the validation loss for this epoch.
+        eval_loss = 0.0
+        predictions, true_labels = [], []
+        for batch in eval_dataloader:
+            batch = tuple(t.to(self.device) for t in batch)
+            b_input_ids, b_input_mask, b_labels = batch
 
-                # Calculate the accuracy for this batch of test sentences.
-                eval_loss += outputs[0].mean().item()
-                predictions.extend([list(p) for p in np.argmax(logits, axis=2)])
-                true_labels.extend(label_ids)
+            # Telling the model not to compute or store gradients,
+            # saving memory and speeding up validation
+            with torch.no_grad():
+                # Forward pass, calculate logit predictions.
+                # This will return the logits rather than the loss because we have not provided labels.
+                outputs = self.model(
+                    b_input_ids,
+                    token_type_ids=None,
+                    attention_mask=b_input_mask,
+                    labels=b_labels,
+                )
+            # Move logits and labels to CPU
+            logits = outputs[1].detach().cpu().numpy()
+            label_ids = b_labels.to("cpu").numpy()
 
-            eval_loss = eval_loss / len(eval_dataloader)
-            self.validation_loss_values.append(eval_loss)
-            print("Validation loss: {}".format(eval_loss))
-            pred_tags = [
+            # Calculate the accuracy for this batch of test sentences.
+            eval_loss += outputs[0].mean().item()
+            predictions.extend([list(p) for p in np.argmax(logits, axis=2)])
+            true_labels.extend(label_ids)
+
+        eval_loss = eval_loss / len(eval_dataloader)
+        print("Validation loss: {}".format(eval_loss))
+
+        pred_tags_by_sentence = [
+            [
                 self.label_values[p_i]
-                for p, l in zip(predictions, true_labels)
                 for p_i, l_i in zip(p, l)
                 if self.label_values[l_i] != self.ner_args.pad_token_value
             ]
-            valid_tags = [
+            for p, l in zip(predictions, true_labels)
+        ]
+        valid_tags_by_sentence = [
+            [
                 self.label_values[l_i]
-                for ll in true_labels
                 for l_i in ll
                 if self.label_values[l_i] != self.ner_args.pad_token_value
             ]
-            print(
-                "Validation Accuracy: {}".format(accuracy_score(valid_tags, pred_tags))
-            )
-            print("Validation F1-Score: {}".format(f1_score(valid_tags, pred_tags)))
-            print()
+            for ll in true_labels
+        ]
 
+        print(
+            "Validation Accuracy: {}".format(
+                accuracy_score(valid_tags_by_sentence, pred_tags_by_sentence)
+            )
+        )
+        print(
+            "Validation F1-Score: {}".format(
+                f1_score(valid_tags_by_sentence, pred_tags_by_sentence)
+            )
+        )
+        print()
+
+        if exact_match:
             print("=== Exact match scores ===")
-            print(classification_report(valid_tags, pred_tags))
+            print(classification_report(valid_tags_by_sentence, pred_tags_by_sentence))
             print()
 
-            print("=== elementwise scores ===")
-            raw_valid_tags = list(map(remove_bio, valid_tags))
-            raw_pred_tags = list(map(remove_bio, pred_tags))
-
-            elementwise_report = skl_classification_report(
-                raw_valid_tags, raw_pred_tags
-            )
-            print(elementwise_report)
-            print()
-
-            print("=== Partial match socres ===")
-            pred_tags_by_sentence = [
-                [
-                    self.label_values[p_i]
-                    for p_i, l_i in zip(p, l)
-                    if self.label_values[l_i] != self.ner_args.pad_token_value
-                ]
-                for p, l in zip(predictions, true_labels)
-            ]
-            valid_tags_by_sentence = [
-                [
-                    self.label_values[l_i]
-                    for l_i in ll
-                    if self.label_values[l_i] != self.ner_args.pad_token_value
-                ]
-                for ll in true_labels
-            ]
+        if partial_match:
+            print("=== Partial match scores ===")
 
             partial_match_report = make_partial_match_report(
                 valid_tags_by_sentence, pred_tags_by_sentence
@@ -388,52 +400,116 @@ class NERModel:
             print(partial_match_report)
             print()
 
-            # print("=== SemEval metrics ===")
-            # evaluator = Evaluator(
-            #     valid_tags_by_sentence,
-            #     pred_tags_by_sentence,
-            #     tags=self.raw_labels_values,
-            #     loader="list",
-            # )
-            # _, results_by_tag = evaluator.evaluate()
-            # score_types = ["ent_type", "partial", "strict", "exact"]
-            # for score_type in score_types:
-            #     print()
-            #     print(f"---{score_type}---")
-            #     df = pd.DataFrame(
-            #         {
-            #             label: {
-            #                 key: val
-            #                 for key, val in scores[score_type].items()
-            #                 if key in ["precision", "recall"]
-            #             }
-            #             for label, scores in results_by_tag.items()
-            #         }
-            #     ).transpose()
-            #     print(df)
-
+        if tokenwise_scores:
+            print("=== tokenwise scores ===")
+            print(
+                make_tokenwise_scores_report(
+                    valid_tags_by_sentence, pred_tags_by_sentence
+                )
+            )
             print()
-        ############ TODO: dirty
 
-    def predict(self, text: str):
+        if semeval_scores:
+            print("=== SemEval scores ===")
+            semeval_scores = compute_semeval_scores(
+                valid_tags_by_sentence, pred_tags_by_sentence, self.raw_labels_values
+            )
+            for score_type, scores in semeval_scores.items():
+                print(f"---- {score_type} ----")
+                print()
+                print(scores)
+            print()
+
+        print()
+
+        return eval_loss
+
+    def predict(
+        self,
+        sentences: Union[List[str], List[List[str]]],
+        pre_tokenized: bool = False,
+        remove_pad_token_logit: bool = True,
+        by_raw_labels: bool = True,
+    ):
         self.model.eval()
+        sentences_tokens = []
+        sentences_logits = []
+        for text in sentences:
+            if pre_tokenized is True:
+                tokens = text
+            else:
+                tokens = self.tokenizer.tokenize(text)
 
-        tokens = self.tokenizer.tokenize(text)
-        tokens_ids, attention_mask, _ = self.pad_tokens([tokens])
+            tokens_ids, attention_mask, _ = self.pad_tokens([tokens])
 
-        tokens_ids = tokens_ids.to(self.device)
-        attention_mask = attention_mask.to(self.device)
+            tokens_ids = tokens_ids.to(self.device)
+            attention_mask = attention_mask.to(self.device)
 
-        with torch.no_grad():
-            tokens_logits = self.model(
-                tokens_ids, token_type_ids=None, attention_mask=attention_mask
-            )[0]
+            with torch.no_grad():
+                tokens_logits = (
+                    self.model(
+                        tokens_ids, token_type_ids=None, attention_mask=attention_mask
+                    )[0][0]
+                    .cpu()
+                    .numpy()
+                )
 
-        tokens_with_logits = dict(
-            {tokens[i]: tokens_logits[0, i] for i in range(len(tokens))}
+            if remove_pad_token_logit:
+                tokens_logits = np.delete(
+                    tokens_logits,
+                    obj=self.labels[self.ner_args.pad_token_value],
+                    axis=1,
+                )
+
+            if by_raw_labels:
+                tokens_logits = np.vstack(
+                    [
+                        tokens_logits[:, self.raw_labels_ids[raw_tag]].mean(axis=1)
+                        for raw_tag in self.raw_labels_values
+                    ]
+                ).transpose()
+
+            sentences_tokens.append(tokens)
+            sentences_logits.append(tokens_logits)
+
+        return sentences_tokens, sentences_logits
+
+    def predict_proba(
+        self,
+        sentences: List[str],
+        pre_tokenized: bool = False,
+        remove_pad_token_logit: bool = True,
+        by_raw_labels: bool = True,
+    ):
+        sentences_tokens, sentences_logits = self.predict(
+            sentences,
+            pre_tokenized=pre_tokenized,
+            by_raw_labels=by_raw_labels,
+            remove_pad_token_logit=remove_pad_token_logit,
         )
 
-        return tokens_with_logits
+        sentences_probas = [
+            softmax(
+                logits,
+                axis=1,
+            )
+            for logits in sentences_logits
+        ]
+
+        return sentences_tokens, sentences_probas
+
+    def predict_proba_and_preserve_labels(self, text_data: pd.DataFrame):
+        sentences, labels = get_sentences(text_data)
+        tokenized_texts_and_labels = [
+            self.tokenize_and_preserve_labels(sent, labs)
+            for sent, labs in zip(sentences, labels)
+        ]
+        sentences_tokens = [elt[0] for elt in tokenized_texts_and_labels]
+        sentences_true_labels = [elt[1] for elt in tokenized_texts_and_labels]
+
+        _, sentences_probas = self.predict_proba(sentences_tokens, pre_tokenized=True)
+
+        return sentences_tokens, sentences_probas, sentences_true_labels
 
     def plot_learning_curve(self):
         # Use plot styling from seaborn.
@@ -444,8 +520,10 @@ class NERModel:
         plt.rcParams["figure.figsize"] = (12, 6)
 
         # Plot the learning curve.
-        plt.plot(self.loss_values, "b-o", label="training loss")
-        plt.plot(self.validation_loss_values, "r-o", label="validation loss")
+        plt.plot(self.train_loss_values, "b-o", label="training loss")
+
+        if len(self.validation_loss_values) > 0:
+            plt.plot(self.validation_loss_values, "r-o", label="validation loss")
 
         plt.title("Learning curve")
         plt.xlabel("Epoch")
