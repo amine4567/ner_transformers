@@ -4,16 +4,8 @@ from typing import List, Tuple, Optional, Union
 import numpy as np
 import pandas as pd
 from transformers import (
-    BertTokenizer,
-    BertForTokenClassification,
-    RobertaTokenizer,
-    RobertaForTokenClassification,
-    CamembertTokenizer,
-    CamembertForTokenClassification,
-    FlaubertTokenizer,
-    FlaubertForTokenClassification,
-    XLMRobertaTokenizer,
-    XLMRobertaForTokenClassification,
+    AutoTokenizer,
+    AutoModelForTokenClassification,
     AdamW,
     get_linear_schedule_with_warmup,
 )
@@ -37,34 +29,6 @@ from scoring import (
     compute_semeval_scores,
 )
 
-model_types = {
-    "bert": {
-        "tokenizer": BertTokenizer,
-        "model": BertForTokenClassification,
-    },
-    "roberta": {"tokenizer": RobertaTokenizer, "model": RobertaForTokenClassification},
-    "camembert": {
-        "tokenizer": CamembertTokenizer,
-        "model": CamembertForTokenClassification,
-    },
-    "flaubert": {
-        "tokenizer": FlaubertTokenizer,
-        "model": FlaubertForTokenClassification,
-    },
-    "xlm-roberta": {
-        "tokenizer": XLMRobertaTokenizer,
-        "model": XLMRobertaForTokenClassification,
-    },
-}
-
-models_map = {
-    "bert-base-multilingual-uncased": "bert",
-    "roberta-base": "roberta",
-    "camembert-base": "camembert",
-    "flaubert/flaubert_base_cased": "flaubert",
-    "xlm-roberta-base": "xlm-roberta",
-}
-
 
 @dataclass
 class NERArgs:
@@ -85,7 +49,7 @@ class NERModel:
         self, model_name: str, labels: List[str], ner_args: Optional[NERArgs] = None
     ):
         self.model_name = model_name
-        self.model_type = models_map[self.model_name]
+        # self.model_type = models_map[self.model_name]
 
         self.ner_args = ner_args if ner_args is not None else NERArgs()
 
@@ -94,16 +58,11 @@ class NERModel:
 
         self.set_raw_labels_data()
 
-        model_tools = model_types[self.model_type]
-
-        self.tokenizer_class = model_tools["tokenizer"]
-        self.tokenizer = self.tokenizer_class.from_pretrained(
+        self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_name, do_lower_case=self.ner_args.do_lower_case
         )
 
-        self.model_class = model_tools["model"]
-
-        self.model = self.model_class.from_pretrained(
+        self.model = AutoModelForTokenClassification.from_pretrained(
             self.model_name,
             num_labels=len(self.labels),
             output_attentions=False,
@@ -116,9 +75,7 @@ class NERModel:
     def set_raw_labels_data(self):
         labels_ids_df = (
             pd.DataFrame(
-                index=self.labels.keys(),
-                columns=["id"],
-                data=self.labels.values(),
+                index=self.labels.keys(), columns=["id"], data=self.labels.values(),
             )
             .reset_index()
             .rename(columns={"index": "bio_tag"})
@@ -488,13 +445,7 @@ class NERModel:
             remove_pad_token_logit=remove_pad_token_logit,
         )
 
-        sentences_probas = [
-            softmax(
-                logits,
-                axis=1,
-            )
-            for logits in sentences_logits
-        ]
+        sentences_probas = [softmax(logits, axis=1,) for logits in sentences_logits]
 
         return sentences_tokens, sentences_probas
 
