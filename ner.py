@@ -49,7 +49,6 @@ class NERModel:
         self, model_name: str, labels: List[str], ner_args: Optional[NERArgs] = None
     ):
         self.model_name = model_name
-        # self.model_type = models_map[self.model_name]
 
         self.ner_args = ner_args if ner_args is not None else NERArgs()
 
@@ -75,7 +74,9 @@ class NERModel:
     def set_raw_labels_data(self):
         labels_ids_df = (
             pd.DataFrame(
-                index=self.labels.keys(), columns=["id"], data=self.labels.values(),
+                index=self.labels.keys(),
+                columns=["id"],
+                data=self.labels.values(),
             )
             .reset_index()
             .rename(columns={"index": "bio_tag"})
@@ -170,7 +171,15 @@ class NERModel:
 
         return dataloader
 
-    def fit(self, train_data: pd.DataFrame, eval_data: pd.DataFrame = None):
+    def fit(
+        self,
+        train_data: pd.DataFrame,
+        eval_data: pd.DataFrame = None,
+        eval_exact_match: bool = True,
+        eval_partial_match: bool = False,
+        eval_tokenwise_scores: bool = False,
+        eval_semeval_scores: bool = False,
+    ):
         """[summary]
 
         :Parameters:
@@ -269,7 +278,13 @@ class NERModel:
             self.train_loss_values.append(avg_train_loss)
 
             if eval_data is not None:
-                eval_loss = self.evaluate(eval_data)
+                eval_loss = self.evaluate(
+                    eval_data,
+                    exact_match=eval_exact_match,
+                    partial_match=eval_partial_match,
+                    tokenwise_scores=eval_tokenwise_scores,
+                    semeval_scores=eval_semeval_scores,
+                )
                 self.validation_loss_values.append(eval_loss)
 
     def evaluate(
@@ -445,7 +460,13 @@ class NERModel:
             remove_pad_token_logit=remove_pad_token_logit,
         )
 
-        sentences_probas = [softmax(logits, axis=1,) for logits in sentences_logits]
+        sentences_probas = [
+            softmax(
+                logits,
+                axis=1,
+            )
+            for logits in sentences_logits
+        ]
 
         return sentences_tokens, sentences_probas
 
