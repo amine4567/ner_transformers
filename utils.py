@@ -1,3 +1,5 @@
+import os
+
 import pandas as pd
 
 
@@ -26,3 +28,14 @@ def remove_bio(label: str):
     if label.startswith("B-") or label.startswith("I-"):
         return label[2:]
     return label
+
+
+def get_explainer_report_template() -> str:
+    current_dir = os.path.dirname(os.path.realpath(__file__))
+
+    with open(
+        os.path.join(current_dir, "assets", "ner_explainer_report_template.html"), "r"
+    ) as f:
+        report_template = f.read()
+
+    return report_template

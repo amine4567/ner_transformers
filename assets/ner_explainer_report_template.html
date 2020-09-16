@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+
+<head>
+    <title>
+        NER Explainer report
+    </title>
+    <style>
+        html {
+            font-size: 1.2em;
+        }
+
+        {{ div_ids }} {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    word:
+    <script language="JavaScript">
+
+        let WordId = {{ WordId_array }}
+
+        function getContent(slction) {
+            txtSelected = slction.selectedIndex;
+            for (let i = 0; i < WordId.length; i++) {
+                document.getElementById(WordId[i]).style.display = (i === txtSelected) ? "contents" : "none";
+            }
+        }
+    </script>
+
+
+    <select onchange="getContent(this)">
+        {{ select_options }}
+    </select>
+
+    {{ divs_content }}
+    
+</body>
+
+</html>

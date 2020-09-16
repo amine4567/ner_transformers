@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import partial
 from typing import List, Tuple, Optional, Union
 
 import numpy as np
@@ -21,8 +22,10 @@ from seqeval.metrics import (
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.special import softmax
+from eli5.lime import TextExplainer
+from eli5.lime.samplers import MaskingTextSampler
 
-from utils import get_sentences
+from utils import get_sentences, get_explainer_report_template
 from scoring import (
     make_partial_match_report,
     make_tokenwise_scores_report,
@@ -42,6 +45,8 @@ class NERArgs:
     weight_decay_rate: float = 0.01
     learning_rate: float = 3e-5
     adam_epsilon: float = 1e-8
+    unk_token: str = "<unk>"
+    explainer_max_replace: float = 0.7
 
 
 class NERModel:
@@ -112,11 +117,16 @@ class NERModel:
         return tokenized_sentence, labels
 
     def pad_tokens(
-        self, tokens: List[str], tokens_labels: Optional[List[str]] = None
+        self,
+        sentences_tokens: List[List[str]],
+        tokens_labels: Optional[List[List[str]]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         input_ids = torch.tensor(
             pad_sequences(
-                [self.tokenizer.convert_tokens_to_ids(txt) for txt in tokens],
+                [
+                    self.tokenizer.convert_tokens_to_ids(tokens)
+                    for tokens in sentences_tokens
+                ],
                 maxlen=self.ner_args.max_sequence_len,
                 dtype="long",
                 value=0.0,
@@ -446,6 +456,58 @@ class NERModel:
 
         return sentences_tokens, sentences_logits
 
+    def predict_new(
+        self,
+        sentences: Union[List[str], List[List[str]]],
+        pre_tokenized: bool = False,
+        remove_pad_token_logit: bool = True,
+        by_raw_labels: bool = True,
+    ):
+        # TODO: change name when sure
+        self.model.eval()
+
+        if pre_tokenized:
+            sentences_tokens = sentences
+        else:
+            sentences_tokens = [
+                self.tokenizer.tokenize(sentence) for sentence in sentences
+            ]
+
+        # padded_tokens = [self.pad_tokens([tokens]) for tokens in sentences_tokens]
+        tokens_ids, attention_mask, _ = self.pad_tokens(sentences_tokens)
+
+        tokens_ids = tokens_ids.to(self.device)
+        attention_mask = attention_mask.to(self.device)
+
+        with torch.no_grad():
+            tokens_logits = (
+                self.model(
+                    tokens_ids, token_type_ids=None, attention_mask=attention_mask
+                )[0]
+                .cpu()
+                .numpy()
+            )
+
+        if remove_pad_token_logit:
+            tokens_logits = np.delete(
+                tokens_logits,
+                obj=self.labels[self.ner_args.pad_token_value],
+                axis=2,
+            )
+
+        if by_raw_labels:
+            tokens_logits = np.concatenate(
+                [
+                    tokens_logits[:, :, self.raw_labels_ids[raw_tag]].mean(axis=2)[
+                        :, :, np.newaxis
+                    ]
+                    for raw_tag in self.raw_labels_values
+                ],
+                axis=2,
+            )
+
+        return sentences_tokens, tokens_logits
+
     def predict_proba(
         self,
         sentences: List[str],
@@ -503,3 +565,94 @@ class NERModel:
         plt.legend()
 
         plt.show()
+
+    def get_word_probas(
+        self, sentence_tokens: List[str], tokens_logits: List[np.array], word_index: int
+    ):
+        words_logits: List = []
+        new_word = None
+        for i, token in enumerate(sentence_tokens):
+            if (
+                token.startswith("▁") or token == self.ner_args.unk_token
+            ):  # TODO: specific to CamemBERT tokenizer
+                if new_word is not None:
+                    words_logits.append(new_word)
+                new_word = [tokens_logits[i]]
+            else:
+                new_word.append(tokens_logits[i])
+
+        words_logits.append(new_word)
+
+        words_logits = np.array(
+            [np.array(logits).mean(axis=0) for logits in words_logits]
+        )
+        words_probas = softmax(words_logits, axis=1)
+
+        return words_probas[word_index]
+
+    def explainer_predict_proba(self, texts: List[str], word_index: int):
+        sentences_tokens, sentences_logits = self.predict_new(
+            texts, by_raw_labels=False
+        )
+
+        words_probas = np.array(
+            [
+                self.get_word_probas(
+                    sentences_tokens[i], sentences_logits[i], word_index
+                )
+                for i in range(len(texts))
+            ]
+        )
+
+        return words_probas
+
+    def explain(self, sentence: str, word_index: int):
+        sampler = MaskingTextSampler(
+            replacement=self.ner_args.unk_token,
+            max_replace=self.ner_args.explainer_max_replace,
+            token_pattern=None,
+            bow=False,
+        )
+        te = TextExplainer(sampler=sampler, position_dependent=True)
+
+        custom_predict_proba = partial(
+            self.explainer_predict_proba, word_index=word_index
+        )
+        te.fit(sentence, custom_predict_proba)
+
+        return te
+
+    def generate_explainer_report(self, sentence: str, output_filename: str):
+        sentence_words = sentence.split(" ")
+
+        words_explainers = {
+            word: self.explain(sentence, word_index=i)
+            for i, word in enumerate(sentence_words)
+        }
+
+        word_id_array = [f"word{i}" for i in range(len(sentence_words))]
+        div_ids = ", ".join(["#" + elt for elt in word_id_array if elt != "word0"])
+        select_options = "\n".join(
+            [f"<option> {word} </option>" for word in sentence_words]
+        )
+        explained_html_content = [
+            words_explainers[word].show_prediction(target_names=self.label_values).data
+            for word in sentence_words
+        ]
+        divs_content = [
+            f"<div id=word{i}>\n{content}\n</div>"
+            for i, content in enumerate(explained_html_content)
+        ]
+        divs_content_str = "\n".join(divs_content)
+
+        html_report = get_explainer_report_template()
+
+        html_report = (
+            html_report.replace("{{ div_ids }}", div_ids)
+            .replace("{{ WordId_array }}", str(word_id_array))
+            .replace("{{ select_options }}", str(select_options))
+            .replace("{{ divs_content }}", str(divs_content_str))
+        )
+
+        with open(output_filename, "w") as f:
+            f.write(html_report)
