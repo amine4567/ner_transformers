@@ -567,30 +567,44 @@ class NERModel:
         plt.show()
 
     def get_word_probas(
-        self, sentence_tokens: List[str], tokens_logits: List[np.array], word_index: int
+        self,
+        sentence: str,
+        sentence_tokens: List[str],
+        tokens_logits: List[np.array],
+        word_index: Optional[int] = None,
     ):
-        words_logits: List = []
-        new_word = None
-        for i, token in enumerate(sentence_tokens):
-            if (
-                token.startswith("▁") or token == self.ner_args.unk_token
-            ):  # TODO: specific to CamemBERT tokenizer
-                if new_word is not None:
-                    words_logits.append(new_word)
-                new_word = [tokens_logits[i]]
-            else:
-                new_word.append(tokens_logits[i])
+        sentence_words = sentence.split(" ")
 
-        words_logits.append(new_word)
+        words = []
+        words_logits = []
+
+        i_min = 0
+        for word in sentence_words:
+            tokenized_word = self.tokenizer.tokenize(word)
+            n_tokens = len(tokenized_word)
+            i_max = i_min + n_tokens - 1
+            context_tokens = sentence_tokens[i_min : i_max + 1]
+            context_logits = tokens_logits[i_min : i_max + 1]
+            assert context_tokens == tokenized_word
+            i_min = i_max + 1
+            words.append(word)
+            words_logits.append(context_logits)
+
+        assert i_max == len(sentence_tokens) - 1
 
         words_logits = np.array(
             [np.array(logits).mean(axis=0) for logits in words_logits]
         )
         words_probas = softmax(words_logits, axis=1)
 
-        return words_probas[word_index]
+        if word_index is None:
+            return words_probas
+        else:
+            return words_probas[word_index]
 
-    def explainer_predict_proba(self, texts: List[str], word_index: int):
+    def explainer_predict_proba(
+        self, texts: List[str], word_index: Optional[int] = None
+    ):
         sentences_tokens, sentences_logits = self.predict_new(
             texts, by_raw_labels=False
         )
@@ -598,9 +612,9 @@ class NERModel:
         words_probas = np.array(
             [
                 self.get_word_probas(
-                    sentences_tokens[i], sentences_logits[i], word_index
+                    sentence, sentences_tokens[i], sentences_logits[i], word_index
                 )
-                for i in range(len(texts))
+                for i, sentence in enumerate(texts)
             ]
         )
 
@@ -625,6 +639,17 @@ class NERModel:
     def generate_explainer_report(self, sentence: str, output_filename: str):
         sentence_words = sentence.split(" ")
 
+        # original sentence prediction
+        prediction_probas = self.explainer_predict_proba([sentence])[0]
+        pred_labels_indices = np.argmax(prediction_probas, axis=1)
+
+        labels_array = [self.label_values[label_id] for label_id in pred_labels_indices]
+        probas_array = [
+            round(prediction_probas[i, label_id], 2)
+            for i, label_id in enumerate(pred_labels_indices)
+        ]
+
+        # Explainer report
         words_explainers = {
             word: self.explain(sentence, word_index=i)
             for i, word in enumerate(sentence_words)
@@ -649,7 +674,9 @@ class NERModel:
 
         html_report = (
             html_report.replace("{{ div_ids }}", div_ids)
-            .replace("{{ WordId_array }}", str(word_id_array))
+            .replace("{{ wordId_array }}", str(word_id_array))
+            .replace("{{ labels_array }}", str(labels_array))
+            .replace("{{ probas_array }}", str(probas_array))
             .replace("{{ select_options }}", str(select_options))
             .replace("{{ divs_content }}", str(divs_content_str))
         )

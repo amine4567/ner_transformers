@@ -1,6 +1,8 @@
 import os
+from typing import Callable
 
 import pandas as pd
+from transformers.tokenization_auto import AutoTokenizer
 
 
 def get_sentences(data: pd.DataFrame):
@@ -39,3 +41,20 @@ def get_explainer_report_template() -> str:
         report_template = f.read()
 
     return report_template
+
+
+def tokenize_and_keep_words(sentence: str, tokenizer_func: Callable):
+    words = sentence.split(" ")
+    tokens_and_words = [
+        (token, word) for word in words for token in tokenizer_func(word)
+    ]
+
+    return tokens_and_words
+
+
+if __name__ == "__main__":
+    tokenizer = AutoTokenizer.from_pretrained("camembert-base")
+
+    sentence = "L'engin Mauzin a heurté le TGV 44566 sur la voie principale"
+
+    a = tokenize_and_keep_words(sentence, tokenizer.tokenize)

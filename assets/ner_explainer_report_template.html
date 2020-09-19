@@ -15,24 +15,37 @@
     </style>
 </head>
 
-<body>
+<body onload="getInitLabel()">
     word:
     <script language="JavaScript">
 
-        let WordId = {{ WordId_array }}
-
+        let wordId = {{ wordId_array }}
+        let labels = {{ labels_array }}
+        let probas = {{ probas_array }}
+        
         function getContent(slction) {
             txtSelected = slction.selectedIndex;
-            for (let i = 0; i < WordId.length; i++) {
-                document.getElementById(WordId[i]).style.display = (i === txtSelected) ? "contents" : "none";
+            for (let i = 0; i < wordId.length; i++) {
+                document.getElementById(wordId[i]).style.display = (i === txtSelected) ? "contents" : "none";
+                document.getElementById("label").innerHTML = labels[txtSelected];
+                document.getElementById("proba").innerHTML = probas[txtSelected]; 
             }
         }
-    </script>
 
+        function getInitLabel() {
+            document.getElementById("label").innerHTML = labels[0];
+            document.getElementById("proba").innerHTML = probas[0];
+        }
+    </script>
 
     <select onchange="getContent(this)">
         {{ select_options }}
     </select>
+
+    <div id="word_label">
+        <p><span style="font-weight: bold;">Label:</span> <span id="label"></span> </p>
+        <p><span style="font-weight: bold;">Probability:</span> <span id="proba"></span> </p>
+    </div>
 
     {{ divs_content }}
     
