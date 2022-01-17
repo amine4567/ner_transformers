@@ -1,36 +1,32 @@
 from dataclasses import dataclass
 from functools import partial
-from typing import List, Tuple, Optional, Union
+from typing import List, Optional, Tuple, Union
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from transformers import (
-    AutoTokenizer,
-    AutoModelForTokenClassification,
-    AdamW,
-    get_linear_schedule_with_warmup,
-)
-import torch
-from tqdm import trange
-from torch.utils.data import TensorDataset, DataLoader, RandomSampler
-from keras.preprocessing.sequence import pad_sequences
-from seqeval.metrics import (
-    f1_score,
-    accuracy_score,
-    classification_report,
-)
-import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy.special import softmax
+import torch
 from eli5.lime import TextExplainer
 from eli5.lime.samplers import MaskingTextSampler
+from keras.preprocessing.sequence import pad_sequences
+from scipy.special import softmax
+from seqeval.metrics import accuracy_score, classification_report, f1_score
+from torch.utils.data import DataLoader, RandomSampler, TensorDataset
+from tqdm import trange
+from transformers import (
+    AdamW,
+    AutoModelForTokenClassification,
+    AutoTokenizer,
+    get_linear_schedule_with_warmup,
+)
 
-from utils import get_sentences, get_explainer_report_template
-from scoring import (
+from nerkit.scoring import (
+    compute_semeval_scores,
     make_partial_match_report,
     make_tokenwise_scores_report,
-    compute_semeval_scores,
 )
+from nerkit.utils import get_explainer_report_template, get_sentences
 
 
 @dataclass

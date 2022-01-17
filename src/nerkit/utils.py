@@ -50,11 +50,3 @@ def tokenize_and_keep_words(sentence: str, tokenizer_func: Callable):
     ]
 
     return tokens_and_words
-
-
-if __name__ == "__main__":
-    tokenizer = AutoTokenizer.from_pretrained("camembert-base")
-
-    sentence = "L'engin Mauzin a heurté le TGV 44566 sur la voie principale"
-
-    a = tokenize_and_keep_words(sentence, tokenizer.tokenize)

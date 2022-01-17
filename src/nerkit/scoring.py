@@ -3,12 +3,12 @@ from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import classification_report as skl_classification_report
-from seqeval.metrics.sequence_labeling import get_entities
 import portion
 from nervaluate import Evaluator
+from seqeval.metrics.sequence_labeling import get_entities
+from sklearn.metrics import classification_report as skl_classification_report
 
-from utils import remove_bio
+from nerkit.utils import remove_bio
 
 logger = logging.getLogger(__name__)
 
